@@ -1,15 +1,47 @@
 import os
-from flask import Flask, request
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import telebot
 from huggingface_hub import InferenceClient
 
 app = Flask(__name__)
+CORS(app)
+
+# --- CONFIG ---
 TOKEN = "8524330304:AAF2xKJG4oJuFroFEU3f9C0R3I1UfU28h9I"
+RENDER_URL = "https://anne-io.onrender.com"
 bot = telebot.TeleBot(TOKEN)
 
-# Replace this with your actual Render URL
-RENDER_URL = "https://anne-io.onrender.com" 
+# AI Client - Make sure to add HF_TOKEN in Render Environment Variables
+client = InferenceClient(
+    model="meta-llama/Llama-3.3-70B-Instruct", 
+    token=os.environ.get("HF_TOKEN")
+)
 
+# Load Lore
+def get_lore():
+    try:
+        with open("system_prompt.txt", "r") as f:
+            return f.read()
+    except:
+        return "You are Anne, a chill girl from Delhi."
+
+SYSTEM_PROMPT = get_lore()
+tg_history = {}
+
+def ask_anne(user_message, history):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+    
+    try:
+        response = client.chat_completion(messages, max_tokens=100, temperature=0.7)
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Error: {e}")
+        return "my brain is lagging.. wait a sec"
+
+# --- TELEGRAM WEBHOOK LOGIC ---
 @app.route('/' + TOKEN, methods=['POST'])
 def getMessage():
     json_string = request.get_data().decode('utf-8')
@@ -18,16 +50,35 @@ def getMessage():
     return "!", 200
 
 @app.route("/")
-def webhook():
+def webhook_setup():
     bot.remove_webhook()
     bot.set_webhook(url=RENDER_URL + '/' + TOKEN)
     return "Anne's Telegram Bridge is Active!", 200
 
 @bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    # This is where your ask_anne logic goes
-    # For now, let's just test if she responds
-    bot.reply_to(message, "hey.. i'm here now. stop spamming me lol")
+def handle_telegram(message):
+    chat_id = message.chat.id
+    if chat_id not in tg_history:
+        tg_history[chat_id] = []
+    
+    # Get AI Response
+    reply = ask_anne(message.text, tg_history[chat_id])
+    
+    # Save History
+    tg_history[chat_id].append({"role": "user", "content": message.text})
+    tg_history[chat_id].append({"role": "assistant", "content": reply})
+    tg_history[chat_id] = tg_history[chat_id][-10:] # Keep last 10 msgs
+    
+    bot.send_message(chat_id, reply)
+
+# --- WEB UI UI LOGIC ---
+@app.route("/chat", methods=["POST"])
+def web_chat():
+    data = request.json
+    user_msg = data.get("message")
+    history = data.get("history", [])
+    reply = ask_anne(user_msg, history)
+    return jsonify({"reply": reply})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
