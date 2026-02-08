@@ -1,86 +1,83 @@
 import os
-import threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from huggingface_hub import InferenceClient
-import telebot # The Telegram library
+import telebot
 
 app = Flask(__name__)
 CORS(app)
 
-# --- Configuration ---
+# --- Config ---
+# Better to use Render Environment Variables for these!
 TELEGRAM_TOKEN = "8524330304:AAF2xKJG4oJuFroFEU3f9C0R3I1UfU28h9I"
+WEBHOOK_URL = "https://anne-io.onrender.com/telegram" # Replace with your ACTUAL Render URL
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Initialize Hugging Face
 client = InferenceClient(
     model="meta-llama/Llama-3.3-70B-Instruct", 
     token=os.environ.get("HF_TOKEN")
 )
 
-# Load the lore
+# Lore setup
 try:
     with open("system_prompt.txt", "r") as f:
         SYSTEM_PROMPT = f.read()
 except:
-    SYSTEM_PROMPT = "You are Anne. A Gen Z girl."
+    SYSTEM_PROMPT = "You are Anne. A Gen Z girl. Be chill and human."
 
-# To keep track of Telegram history specifically
 tg_history = {}
 
-# --- Logic for Anne's Brain ---
 def ask_anne(user_message, history):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for msg in history:
-        messages.append(msg)
+    messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
     try:
         response = client.chat_completion(messages, max_tokens=150, temperature=0.7)
         return response.choices[0].message.content
-    except Exception as e:
-        return "server's acting up.. gimme a sec 💀"
+    except Exception:
+        return "my brain is lagging.. wait a sec"
 
-# --- Telegram Bot Handlers ---
+# --- TELEGRAM WEBHOOK ROUTE ---
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    else:
+        return jsonify({"error": "unauthorized"}), 403
+
 @bot.message_handler(func=lambda message: True)
-def handle_tg_message(message):
+def handle_tg(message):
     chat_id = message.chat.id
-    
-    # Initialize history for this specific user if not exists
     if chat_id not in tg_history:
         tg_history[chat_id] = []
     
-    # Get Anne's reply
     reply = ask_anne(message.text, tg_history[chat_id])
     
-    # Update local memory
     tg_history[chat_id].append({"role": "user", "content": message.text})
     tg_history[chat_id].append({"role": "assistant", "content": reply})
-    
-    # Keep memory short so it doesn't get slow
-    if len(tg_history[chat_id]) > 10:
-        tg_history[chat_id] = tg_history[chat_id][-10:]
+    tg_history[chat_id] = tg_history[chat_id][-10:]
     
     bot.send_message(chat_id, reply)
 
-# --- Web Interface Route ---
+# --- WEB UI ROUTE ---
 @app.route("/chat", methods=["POST"])
 def web_chat():
     data = request.json
-    user_message = data.get("message")
-    history = data.get("history", [])
-    reply = ask_anne(user_message, history)
+    reply = ask_anne(data.get("message"), data.get("history", []))
     return jsonify({"reply": reply})
 
-# --- Runner ---
-def run_telegram():
-    print("Anne is now listening on Telegram...")
-    bot.polling(none_stop=True)
+# --- SETUP WEBHOOK ON START ---
+@app.route("/")
+def index():
+    # This sets the webhook automatically when you visit the site
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    return "Anne's server is active.", 200
 
 if __name__ == "__main__":
-    # Start Telegram in the background
-    threading.Thread(target=run_telegram, daemon=True).start()
-    
-    # Start the Web Server
     app.run(host="0.0.0.0", port=10000)
     
