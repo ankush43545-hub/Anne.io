@@ -2,3 +2,4 @@ flask
 flask-cors
 huggingface_hub
 gunicorn
+pyTelegramBotAPI
