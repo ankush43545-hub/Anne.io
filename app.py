@@ -12,13 +12,12 @@ client = InferenceClient(
     token=os.environ.get("HF_TOKEN")
 )
 
-# Load Lore
 def get_lore():
     try:
         with open("system_prompt.txt", "r") as f:
             return f.read()
     except:
-        return "You are Anne, a chill girl from Delhi. Keep replies short."
+        return "You are Anne, a chill girl from Delhi."
 
 SYSTEM_PROMPT = get_lore()
 
@@ -33,8 +32,7 @@ def chat():
     history = data.get("history", [])
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    # Add only last 10 messages for memory efficiency
-    messages.extend(history[-10:])
+    messages.extend(history[-10:]) # Memory of last 10 messages
     messages.append({"role": "user", "content": user_msg})
 
     try:
@@ -42,7 +40,6 @@ def chat():
         reply = response.choices[0].message.content
         return jsonify({"reply": reply})
     except Exception as e:
-        print(f"AI Error: {e}")
         return jsonify({"reply": "my brain is lagging.. try again?"}), 500
 
 if __name__ == "__main__":
