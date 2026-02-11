@@ -11,10 +11,10 @@ app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# FREE HuggingFace Client (NO CREDITS)
+# HuggingFace FREE Model (Stable)
 # -----------------------------
 client = InferenceClient(
-    model="mistralai/Mistral-7B-Instruct-v0.2"
+    model="HuggingFaceH4/zephyr-7b-beta"
 )
 
 # -----------------------------
@@ -121,7 +121,7 @@ def get_lore():
     if os.path.exists("system_prompt.txt"):
         with open("system_prompt.txt", "r", encoding="utf-8") as f:
             return f.read()
-    return "You are Anne, a friendly assistant who remembers past conversations."
+    return "You are Anne, a smart assistant with memory."
 
 # -----------------------------
 # Health Endpoint
@@ -181,7 +181,7 @@ def clear_memory():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # -----------------------------
-# Chat Endpoint (Frontend Compatible)
+# Chat Endpoint (SAFE + FRONTEND COMPATIBLE)
 # -----------------------------
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -200,7 +200,7 @@ def chat():
 {lore}
 
 PAST MEMORY:
-{memory if memory else "(no previous memory)"}
+{memory if memory else "(no memory yet)"}
 
 USER:
 {user_message}
@@ -208,14 +208,19 @@ USER:
 ASSISTANT:
 """
 
-        response = client.text_generation(
-            prompt=prompt,
-            max_new_tokens=350,
-            temperature=0.7,
-            top_p=0.9
-        )
+        reply = ""
 
-        reply = (response or "").strip()
+        try:
+            response = client.text_generation(
+                prompt=prompt,
+                max_new_tokens=350,
+                temperature=0.7,
+                top_p=0.9
+            )
+            reply = (response or "").strip()
+        except Exception as hf_error:
+            print("HF ERROR:", hf_error)
+            reply = "I'm online — but my AI engine is busy. Try again in a moment."
 
         if reply:
             save_memory(session_id, "assistant", reply)
@@ -223,8 +228,8 @@ ASSISTANT:
         return jsonify({"response": reply})
 
     except Exception as e:
-        print("chat error:", e)
-        return jsonify({"response": "Anne had a temporary brain glitch — try again 💭"}), 500
+        print("chat fatal error:", e)
+        return jsonify({"response": "Server error — refresh and try again."}), 500
 
 # -----------------------------
 # Run Server
