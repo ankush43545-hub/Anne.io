@@ -4,7 +4,8 @@ from flask_cors import CORS
 from huggingface_hub import InferenceClient
 
 app = Flask(__name__)
-CORS(app)
+# Allow your GitHub frontend to talk to this backend
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 client = InferenceClient(
     model="meta-llama/Llama-3.3-70B-Instruct",
@@ -23,7 +24,7 @@ def get_lore():
 
 SYSTEM_PROMPT = get_lore()
 
-# ✅ Health check route (frontend expects this)
+# ✅ Health check route
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
@@ -34,26 +35,36 @@ def chat():
     try:
         data = request.json
         user_msg = data.get("message")
+        history = data.get("history", []) # Get memory from frontend
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg}
-        ]
+        # 1. Start with her personality
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+        # 2. Add conversation history (Short-term memory)
+        # We take the last 10 messages so she remembers context
+        if history:
+            messages.extend(history[-10:])
+
+        # 3. Add the new message
+        messages.append({"role": "user", "content": user_msg})
+
+        # 4. Generate Reply (THE UNCHAINED SETTINGS)
         response = client.chat_completion(
             messages,
-            max_tokens=120,
-            temperature=0.7
+            max_tokens=500,   # Increased from 120 -> 500 (No length limits)
+            temperature=0.85  # Increased from 0.7 -> 0.85 (More messy/human)
         )
 
         reply = response.choices[0].message.content
 
-        return jsonify({"response": reply})
+        # Returns "reply" to match your script.js
+        return jsonify({"reply": reply})
 
     except Exception as e:
         print("Error:", e)
-        return jsonify({"response": "Anne is thinking... try again 💭"}), 500
+        return jsonify({"reply": "mera brain lag kar rha h.. wait.."}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+    
