@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from hashlib import sha1
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from huggingface_hub import InferenceClient
@@ -16,7 +17,7 @@ client = InferenceClient(
 )
 
 # -----------------------------
-# SQLite Memory Setup (FREE)
+# SQLite Memory Setup (Fresh Brain)
 # -----------------------------
 conn = sqlite3.connect("memory.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -33,6 +34,17 @@ CREATE TABLE IF NOT EXISTS memories (
 conn.commit()
 
 # -----------------------------
+# Generate Safe Unique User ID (No Frontend Change Needed)
+# -----------------------------
+def get_user_id(data, req):
+    uid = data.get("user_id")
+    if uid:
+        return uid
+    # fallback unique id from device/network
+    key = (req.remote_addr or "") + (req.headers.get("User-Agent",""))
+    return "anon_" + sha1(key.encode()).hexdigest()[:12]
+
+# -----------------------------
 # Save Memory
 # -----------------------------
 def save_memory(user_id, role, message):
@@ -43,7 +55,7 @@ def save_memory(user_id, role, message):
     conn.commit()
 
 # -----------------------------
-# Load Past Memory
+# Load Memory (Recent Only)
 # -----------------------------
 def load_memory(user_id, limit=8):
     cursor.execute(
@@ -55,7 +67,7 @@ def load_memory(user_id, limit=8):
     return "\n".join([f"{r[0]}: {r[1]}" for r in rows])
 
 # -----------------------------
-# System Lore Loader
+# Load System Prompt
 # -----------------------------
 def get_lore():
     if os.path.exists("system_prompt.txt"):
@@ -64,27 +76,28 @@ def get_lore():
     return "You are Anne, a friendly assistant who remembers past conversations."
 
 # -----------------------------
-# Chat API
+# Chat API (Frontend-Compatible)
 # -----------------------------
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
-        data = request.json
-        user_message = data.get("message", "")
-        user_id = data.get("user_id", "default_user")
+        data = request.json or {}
+        user_message = data.get("message", "").strip()
+        user_id = get_user_id(data, request)
 
         lore = get_lore()
         memory = load_memory(user_id)
 
         # Save user message
-        save_memory(user_id, "user", user_message)
+        if user_message:
+            save_memory(user_id, "user", user_message)
 
-        # Build smart prompt with memory
+        # Build prompt with memory
         prompt = f"""
 {lore}
 
 PAST MEMORY:
-{memory}
+{memory if memory else "(no previous memory)"}
 
 USER SAYS:
 {user_message}
@@ -97,18 +110,22 @@ REPLY AS AN INTELLIGENT ASSISTANT THAT REMEMBERS THE USER.
             max_tokens=500
         )
 
-        reply = response.choices[0].message.content
+        reply = response.choices[0].message.content.strip()
 
         # Save bot reply
         save_memory(user_id, "assistant", reply)
 
-        # IMPORTANT: keep response key same as frontend expects
+        # Keep frontend JSON format EXACT
         return jsonify({"response": reply})
 
     except Exception as e:
         print("Error:", e)
-        return jsonify({"response": "Anne is zoning out.. try again 💭"}), 500
+        return jsonify({"response": "Anne is thinking... try again 💭"}), 500
 
+
+# -----------------------------
+# Run Server
+# -----------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
