@@ -1,137 +1,150 @@
-import os
-import json
-import sqlite3
-from hashlib import sha1
-from datetime import datetime
+# app.py — frontend-compatible final version
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import os
+import json
+import time
+import requests
 from huggingface_hub import InferenceClient
 
 app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# HuggingFace FREE Model (Stable)
+# CONFIG
 # -----------------------------
+HF_TOKEN = os.getenv("HF_TOKEN")  # optional, ok if None
+MODEL_NAME = "openchat/openchat-3.5-1210"
 client = InferenceClient(
-    model="HuggingFaceH4/zephyr-7b-beta"
+    model=MODEL_NAME,
+    token=HF_TOKEN,
+    base_url="https://router.huggingface.co"
 )
 
-# -----------------------------
-# SQLite setup
-# -----------------------------
-DB_PATH = "memory.db"
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT,
-    role TEXT,
-    message TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    data TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
-conn.commit()
+MEMORY_FILE = "memory.json"
+SESSIONS_FILE = "sessions.json"
+TRENDS_FILE = "trends.json"
+SYSTEM_PROMPT_FILE = "system_prompt.txt"
 
 # -----------------------------
-# Helpers
+# System prompt loader
 # -----------------------------
-def now_iso():
-    return datetime.utcnow().isoformat() + "Z"
-
-def get_session_identifier(payload, req):
-    sid = None
-    if isinstance(payload, dict):
-        sid = payload.get("sessionId") or payload.get("conversationId") or payload.get("session_id") or payload.get("session")
-    if sid:
-        return str(sid)
-
-    key = (req.remote_addr or "") + (req.headers.get("User-Agent", ""))
-    return "anon_" + sha1(key.encode()).hexdigest()[:12]
-
-def save_memory(session_id, role, message):
-    cursor.execute(
-        "INSERT INTO memories (session_id, role, message) VALUES (?, ?, ?)",
-        (session_id, role, message)
+def load_system_prompt():
+    if os.path.exists(SYSTEM_PROMPT_FILE):
+        try:
+            with open(SYSTEM_PROMPT_FILE, "r", encoding="utf-8") as f:
+                return f.read()
+        except:
+            pass
+    return (
+        "You are Anne. Soft, calm, emotionally warm, slightly playful, "
+        "non-chalant, short replies, no info dumping, no robotic tone. "
+        "You sound natural, gentle, and quietly comforting."
     )
-    conn.commit()
 
-def load_memory(session_id, limit=8):
-    cursor.execute(
-        "SELECT role, message FROM memories WHERE session_id=? ORDER BY id DESC LIMIT ?",
-        (session_id, limit)
-    )
-    rows = cursor.fetchall()
-    rows.reverse()
-    return "\n".join([f"{r[0]}: {r[1]}" for r in rows])
+SYSTEM_PROMPT = load_system_prompt()
+
+# -----------------------------
+# Sessions storage helpers
+# -----------------------------
+def load_sessions():
+    if not os.path.exists(SESSIONS_FILE):
+        return {}
+    with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except:
+            return {}
+
+def save_sessions(data):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 def upsert_session(session_obj):
     sid = session_obj.get("id")
     if not sid:
         return False
-
-    data = json.dumps(session_obj)
-    now = now_iso()
-
-    cursor.execute("SELECT 1 FROM sessions WHERE id=?", (sid,))
-    exists = cursor.fetchone()
-
-    if exists:
-        cursor.execute("UPDATE sessions SET data=?, updated_at=? WHERE id=?", (data, now, sid))
-    else:
-        cursor.execute("INSERT INTO sessions (id, data, created_at, updated_at) VALUES (?, ?, ?, ?)", (sid, data, now, now))
-
-    conn.commit()
+    sessions = load_sessions()
+    sessions[sid] = session_obj
+    # add timestamps if missing
+    if "createdAt" not in sessions[sid]:
+        sessions[sid].setdefault("createdAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    sessions[sid].setdefault("updatedAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    save_sessions(sessions)
     return True
 
-def get_session(sid):
-    cursor.execute("SELECT data, created_at, updated_at FROM sessions WHERE id=?", (sid,))
-    row = cursor.fetchone()
-    if not row:
-        return None
+def fetch_session_object(sid):
+    sessions = load_sessions()
+    return sessions.get(sid)
 
-    data, created_at, updated_at = row
+# -----------------------------
+# Memory helpers
+# -----------------------------
+def load_memory():
+    if not os.path.exists(MEMORY_FILE):
+        return {}
+    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except:
+            return {}
 
+def save_memory(mem):
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(mem, f, indent=2)
+
+# -----------------------------
+# Trends helpers (light)
+# -----------------------------
+def update_trends():
     try:
-        session_obj = json.loads(data)
+        url = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=US"
+        r = requests.get(url, timeout=8)
+        trends = []
+        if r.status_code == 200:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(r.text)
+            for item in root.findall(".//item/title")[:5]:
+                trends.append(item.text)
+        with open(TRENDS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"time": time.time(), "trends": trends}, f)
     except:
-        session_obj = {"id": sid, "messages": []}
+        pass
 
-    session_obj.setdefault("createdAt", created_at if created_at else now_iso())
-    session_obj.setdefault("updatedAt", updated_at if updated_at else now_iso())
-
-    return session_obj
+def load_trends():
+    if not os.path.exists(TRENDS_FILE):
+        update_trends()
+        return []
+    with open(TRENDS_FILE, "r", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except:
+            return []
+    if time.time() - data.get("time", 0) > 86400:
+        update_trends()
+    return data.get("trends", [])
 
 # -----------------------------
-# System Prompt Loader
+# Helpers to derive session id used by frontend
 # -----------------------------
-def get_lore():
-    if os.path.exists("system_prompt.txt"):
-        with open("system_prompt.txt", "r", encoding="utf-8") as f:
-            return f.read()
-    return "You are Anne, a smart assistant with memory."
+def get_session_identifier(payload, req):
+    if isinstance(payload, dict):
+        for key in ("sessionId", "conversationId", "session", "session_id", "id", "user_id"):
+            val = payload.get(key)
+            if val:
+                return str(val)
+    # fallback to remote addr
+    return req.remote_addr or "anon"
 
 # -----------------------------
-# Health Endpoint
+# Health endpoint (frontend probes this)
 # -----------------------------
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"ok": True}), 200
 
 # -----------------------------
-# Session Endpoints
+# Session endpoints (frontend uses these)
 # -----------------------------
 @app.route("/session", methods=["POST"])
 def save_session():
@@ -139,100 +152,109 @@ def save_session():
         payload = request.json or {}
         if not isinstance(payload, dict) or not payload.get("id"):
             return jsonify({"ok": False, "error": "session must include id"}), 400
-
         upsert_session(payload)
         return jsonify({"ok": True})
-
     except Exception as e:
         print("save_session error:", e)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/session/<sid>", methods=["GET"])
-def fetch_session(sid):
+def get_session(sid):
     try:
-        session_obj = get_session(sid)
-        if not session_obj:
+        s = fetch_session_object(sid)
+        if not s:
             return jsonify({"error": "not found"}), 404
-        return jsonify(session_obj)
-
+        return jsonify(s)
     except Exception as e:
-        print("fetch_session error:", e)
+        print("get_session error:", e)
         return jsonify({"error": str(e)}), 500
 
 # -----------------------------
-# Clear Memory
+# Clear memory endpoint (optional utility)
 # -----------------------------
 @app.route("/clear_memory", methods=["POST"])
 def clear_memory():
     try:
         data = request.json or {}
         sid = data.get("sessionId") or data.get("session_id") or data.get("id")
-
         if not sid:
-            return jsonify({"ok": False, "error": "need sessionId"}), 400
-
-        cursor.execute("DELETE FROM memories WHERE session_id=?", (sid,))
-        conn.commit()
-
+            return jsonify({"ok": False, "error": "need session id"}), 400
+        mem = load_memory()
+        if sid in mem:
+            del mem[sid]
+            save_memory(mem)
         return jsonify({"ok": True})
-
     except Exception as e:
         print("clear_memory error:", e)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # -----------------------------
-# Chat Endpoint (SAFE + FRONTEND COMPATIBLE)
+# Chat endpoint (frontend posts {message, sessionId, conversationId, ...})
+# Returns {"response": "..."} exactly as frontend expects
 # -----------------------------
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
         data = request.json or {}
-        user_message = data.get("message", "") or ""
+        user_message = (data.get("message") or "").strip()
         session_id = get_session_identifier(data, request)
 
-        lore = get_lore()
-        memory = load_memory(session_id)
+        if not user_message:
+            return jsonify({"response": "Say something… I’m here."})
 
-        if user_message.strip():
-            save_memory(session_id, "user", user_message.strip())
+        # load existing memory and trends
+        mem = load_memory()
+        user_memory = mem.get(session_id, [])
+        trends = load_trends()
 
-        prompt = f"""
-{lore}
+        # keep small memory context
+        memory_text = "\n".join(user_memory[-6:])
+        trend_text = ", ".join(trends)
 
-PAST MEMORY:
-{memory if memory else "(no memory yet)"}
+        # Build prompt (system prompt + light context)
+        system_prompt = SYSTEM_PROMPT
+        prompt = f"""{system_prompt}
 
-USER:
+Recent trends:
+{trend_text}
+
+Past memory:
+{memory_text}
+
+User:
 {user_message}
 
-ASSISTANT:
+Reply softly, calmly, and naturally. Keep responses short. Avoid over-explaining.
 """
 
-        reply = ""
-
+        # Call HF Router chat completion
         try:
-            response = client.text_generation(
-                prompt=prompt,
-                max_new_tokens=350,
-                temperature=0.7,
-                top_p=0.9
+            response = client.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=160,
+                temperature=0.8
             )
-            reply = (response or "").strip()
-        except Exception as hf_error:
-            print("HF ERROR:", hf_error)
-            reply = "I'm online — but my AI engine is busy. Try again in a moment."
+            # typical response structure
+            bot_reply = response.choices[0].message.content.strip()
+        except Exception as hf_err:
+            print("HF error:", hf_err)
+            # fallback friendly response so UI never goes offline
+            bot_reply = f"I heard you: \"{user_message}\" — I'm here. Tell me more."
 
-        if reply:
-            save_memory(session_id, "assistant", reply)
+        # Save memory
+        user_memory.append(f"User: {user_message}")
+        user_memory.append(f"Anne: {bot_reply}")
+        mem[session_id] = user_memory[-40:]
+        save_memory(mem)
 
-        return jsonify({"response": reply})
+        return jsonify({"response": bot_reply})
 
     except Exception as e:
         print("chat fatal error:", e)
-        return jsonify({"response": "Server error — refresh and try again."}), 500
+        return jsonify({"response": "Anne hit a small glitch — try again."}), 500
 
 # -----------------------------
-# Run Server
+# Run (Render will run via gunicorn; this helps local dev)
 # -----------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
